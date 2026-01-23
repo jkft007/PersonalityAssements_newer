@@ -1,0 +1,132 @@
+{
+  "timestamp": "2024-06-15T14:22:33.456789",
+  "total_questions": 18,
+  "responses": [
+    {
+      "question_id": 1,
+      "category": "Stress Response",
+      "question": "When faced with major stress, what do you typically do?",
+      "selected_answer": "I retreat into solitude, need space from people",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 2,
+      "category": "Self-Worth Source",
+      "question": "What makes you feel valuable?",
+      "selected_answer": "My inner world, autonomy",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 3,
+      "category": "Relationship Pattern",
+      "question": "Describe your typical relationship dynamic:",
+      "selected_answer": "I prefer distance, intimacy feels intrusive",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 4,
+      "category": "Anger Expression",
+      "question": "When angry, you:",
+      "selected_answer": "Disconnect emotionally",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 5,
+      "category": "Identity Sense",
+      "question": "How stable is your sense of self?",
+      "selected_answer": "Stable but detached observer",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 6,
+      "category": "Criticism Response",
+      "question": "When someone criticizes you:",
+      "selected_answer": "I don't care, doesn't penetrate",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 7,
+      "category": "Success/Achievement",
+      "question": "When you succeed:",
+      "selected_answer": "Indifferent, just met requirements",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 8,
+      "category": "Alone Time",
+      "question": "Being alone for extended periods:",
+      "selected_answer": "Prefer it, recharge, feel authentic",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 9,
+      "category": "Dependency",
+      "question": "Someone needing you constantly:",
+      "selected_answer": "Suffocating, need escape",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 10,
+      "category": "Moral Transgression",
+      "question": "If you broke your own moral code:",
+      "selected_answer": "Detached observation, intellectualize",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 11,
+      "category": "Fantasy Life",
+      "question": "Your recurring daydreams involve:",
+      "selected_answer": "Elaborate inner worlds, no people needed",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 12,
+      "category": "Body Experience",
+      "question": "Your relationship with your body:",
+      "selected_answer": "Detached, mechanical housing",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 13,
+      "category": "Change/Transition",
+      "question": "Major life changes make you feel:",
+      "selected_answer": "Indifferent if autonomy preserved",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 14,
+      "category": "Competition",
+      "question": "In competitive situations:",
+      "selected_answer": "Disinterested, pointless exercise",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 15,
+      "category": "Authority Figures",
+      "question": "Your relationship with authority:",
+      "selected_answer": "Minimal engagement, comply superficially",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 16,
+      "category": "Emptiness/Meaning",
+      "question": "Sense of inner emptiness:",
+      "selected_answer": "Comfortable void, prefer it",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 17,
+      "category": "Jealousy/Envy",
+      "question": "When others have what you want:",
+      "selected_answer": "Detached observation, don't really want it",
+      "selected_type": "Schizoid"
+    },
+    {
+      "question_id": 18,
+      "category": "Trust",
+      "question": "You trust others:",
+      "selected_answer": "Don't need to, keep distance",
+      "selected_type": "Schizoid"
+    }
+  ]
+}
