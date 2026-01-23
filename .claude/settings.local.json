@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:\\\\Users\\\\jkft0\\\\OneDrive\\\\Repos\\\\Personality\\\\PersonalityAssements_newer\" log --oneline -10)"
+    ]
+  }
+}
