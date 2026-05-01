@@ -1,4 +1,6 @@
-# Make sure you have requirements.txt
-gradio
+gradio>=6.1.0
 python-docx
 python-dotenv
+gTTS
+SpeechRecognition
+openai

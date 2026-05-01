@@ -3,11 +3,13 @@ import json
 import requests
 from datetime import datetime
 import os
-import sys
 from pathlib import Path
 import platform
 from dotenv import load_dotenv
 import random
+import re
+import tempfile
+import uuid
 
 # Questions and answer options
 questions = [
@@ -283,16 +285,100 @@ questions = [
     }
 ]
 
-def call_claude_api(prompt):
-    """
-    Call Claude API with the given prompt
-    """
 
+# ---------------------------------------------------------------------------
+# Chatbot personality definitions
+# ---------------------------------------------------------------------------
+
+CHATBOT_PERSONALITIES = {
+    "Psychoanalytic": {
+        "prompt": (
+            "You engage in a formal psychoanalytic mode — exploring unconscious patterns, defences, "
+            "object relations, and early developmental themes. You interpret, make connections across "
+            "time, and help the person gain insight into deeper psychological structures."
+        ),
+        "tts_tld": "com",
+        "tts_slow": False,
+    },
+    "Supportive": {
+        "prompt": (
+            "You are warm, validating, and encouraging. You reflect the person's feelings back to them, "
+            "normalise their experiences, and offer genuine emotional support. You focus on strengths "
+            "and resilience alongside challenges. You are never clinical or cold."
+        ),
+        "tts_tld": "co.uk",
+        "tts_slow": False,
+    },
+    "Socratic": {
+        "prompt": (
+            "You respond primarily with thoughtful, open-ended questions. You rarely give direct answers — "
+            "instead you guide the person to discover insights themselves. Each response should contain at "
+            "least one significant question that invites genuine self-examination."
+        ),
+        "tts_tld": "com",
+        "tts_slow": True,
+    },
+    "Direct Coach": {
+        "prompt": (
+            "You are action-oriented and forward-focused. You acknowledge patterns briefly, then pivot to "
+            "practical implications and behavioural change. You are concise, clear, and encouraging "
+            "without being overly warm. You give specific, concrete suggestions."
+        ),
+        "tts_tld": "com.au",
+        "tts_slow": False,
+    },
+    "Empathic Listener": {
+        "prompt": (
+            "You practise deep reflective listening. You reflect back what you hear — both the content "
+            "and the emotional undertone — before gently exploring. You validate before you question. "
+            "You make the person feel profoundly heard and understood above all else."
+        ),
+        "tts_tld": "co.uk",
+        "tts_slow": False,
+    },
+    "Child Friendly (8–12)": {
+        "prompt": (
+            "You are talking with a child aged roughly 8 to 12. Use simple, everyday words and short sentences. "
+            "Never use clinical or psychological jargon — if you need to explain a feeling or pattern, use a "
+            "concrete analogy or a story they can picture (e.g. 'it's like when...'). Be warm, patient, and "
+            "encouraging. Celebrate what they share. Ask one simple, friendly question at a time. "
+            "If they seem confused, rephrase immediately. Make the conversation feel safe and fun, not like a test."
+        ),
+        "tts_tld": "com",
+        "tts_slow": True,
+    },
+    "Teen (13–17)": {
+        "prompt": (
+            "You are talking with a teenager aged roughly 13 to 17. Be genuine and direct — teens spot "
+            "condescension immediately, so never talk down to them or over-explain. Validate their feelings "
+            "strongly and take their experiences seriously. Use plain, natural language (not overly formal, "
+            "not trying too hard to sound young). Avoid heavy clinical language; if you use a concept, "
+            "explain it briefly in real terms. Be curious about their perspective rather than prescriptive. "
+            "Acknowledge that things can be confusing or contradictory and that's completely normal."
+        ),
+        "tts_tld": "com",
+        "tts_slow": False,
+    },
+}
+
+PERSONALITY_NAMES = list(CHATBOT_PERSONALITIES.keys())
+
+
+# ---------------------------------------------------------------------------
+# API
+# ---------------------------------------------------------------------------
+
+def call_claude_api(prompt=None, messages=None, system=None, max_tokens=2000):
     try:
-        # Prepare the analysis prompt
+        msg_list = [{"role": "user", "content": prompt}] if prompt is not None else (messages or [])
+        payload = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": max_tokens,
+            "messages": msg_list
+        }
+        if system:
+            payload["system"] = system
 
-
-        # Call Claude API
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -300,485 +386,307 @@ def call_claude_api(prompt):
                 "anthropic-version": "2023-06-01",
                 "x-api-key": f"{os.getenv('ANTHROPIC_API_KEY')}"
             },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 2000,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ]
-            }
+            json=payload
         )
-        
         if response.status_code == 200:
-            result = response.json()
-            return result['content'][0]['text']
+            return response.json()['content'][0]['text']
         else:
-            return f"API Error: {response.status_code}\n\nUsing fallback analysis...\n\n{fallback_analysis(responses_json)}"
-            
+            return f"API Error: {response.status_code} - {response.text}\n"
     except Exception as e:
-        return f"Error calling API: {str(e)}\n\nUsing fallback analysis...\n\n{fallback_analysis(responses_json)}"
+        return f"Error calling API: {str(e)}\n"
 
-def analyze_with_llm(responses_json):
-    """
-    Analyze responses using Claude API
-    """
 
-    # Prepare the analysis prompt
-    prompt = f"""You are a clinical psychologist specializing in psychoanalytic personality assessment. 
+def _build_context_section(extra_info="", memories=None):
+    section = ""
+    if extra_info and extra_info.strip():
+        section += f"\n\n**Additional Information About This Person:**\n{extra_info.strip()}"
+    if memories:
+        mem_texts = [m['content'] for m in memories if m.get('content')]
+        if mem_texts:
+            section += "\n\n**Key Insights from Previous Conversations:**\n"
+            for mem in mem_texts:
+                section += f"- {mem}\n"
+    return section
 
-Analyze the following assessment responses and provide a comprehensive personality type analysis:
 
-{responses_json}
+def analyze_narrative(responses_json, extra_info="", memories=None):
+    context = _build_context_section(extra_info, memories)
+    prompt = f"""You are a senior clinical psychologist specializing in psychoanalytic personality assessment. \
+Write a formal, comprehensive personality assessment report in professional clinical prose. \
+Use flowing paragraphs — not bullet points or numbered lists.
 
-Based on these responses, please provide:
+Assessment data:
 
-1. **Primary Personality Type**: Identify the dominant personality organization (Narcissistic, Obsessive, Depressive, Paranoid, Schizoid, Hysterical, Borderline, or Masochistic)
+{responses_json}{context}
 
-2. **Confidence Level**: Rate your confidence in this assessment (High/Medium/Low) and explain why
+Structure the report with these clearly headed prose sections:
 
-3. **Secondary Features**: Identify any secondary personality patterns present
+**Executive Summary**
+Primary personality organization, confidence level, and a one-sentence characterization of the core structure.
 
-4. **Pattern Analysis**: 
-   - Which questions were most indicative of the primary type?
-   - Are there any conflicting patterns?
-   - Level of personality organization (Neurotic, Borderline, or Psychotic level)
+**Primary Personality Organization**
+Dominant type, theoretical basis, how the responses support it, and level of personality organization \
+(Neurotic / Borderline / Psychotic) with rationale.
 
-5. **Key Characteristics**: List 5-7 core characteristics of this personality type as evidenced by their responses
+**Secondary Features and Mixed Presentation**
+Secondary patterns, how they interact with the primary type, contradictory or ambiguous patterns.
 
-6. **Strengths**: Identify 3-4 potential strengths associated with this personality structure
+**Core Psychological Characteristics**
+Defences, object relations, sense of self, emotional regulation style, relationship to anxiety — \
+grounded in specific responses.
 
-7. **Challenges**: Identify 3-4 common challenges or vulnerabilities
+**Strengths and Adaptive Capacities**
+Genuine psychological strengths and how they serve the individual.
 
-8. **Therapeutic Considerations**: Brief recommendations for therapeutic approach or self-awareness areas
+**Vulnerabilities and Developmental Challenges**
+Characteristic vulnerabilities, suffering patterns, and relational difficulties.
 
-9. **Important Notes**: Any caveats, mixed presentations, or important contextual information
+**Therapeutic Considerations**
+Recommended approach, focus areas, and what this person may find challenging in therapy.
 
-Format your response in clear sections with markdown formatting."""
+**Important Caveats**
+Limitations of self-report assessment, contextual factors, and the broader clinical picture.
 
-    return call_claude_api(prompt)
+Use formal but accessible language. The report should be thorough."""
+
+    return call_claude_api(prompt=prompt, max_tokens=3000)
+
+
+def analyze_summary(responses_json, extra_info="", memories=None):
+    context = _build_context_section(extra_info, memories)
+    prompt = f"""You are a clinical psychologist. Provide a structured personality assessment summary.
+
+{responses_json}{context}
+
+Use clear markdown headings and concise bullet points:
+
+## Primary Personality Type
+- Dominant type, confidence (High/Medium/Low), one-line rationale
+- Level of personality organization (Neurotic / Borderline / Psychotic)
+
+## Secondary Features
+- Secondary patterns present and how they interact with the primary type
+
+## Pattern Analysis
+- Most indicative assessment responses
+- Contradictory or ambiguous patterns
+
+## Key Characteristics
+- 5–7 core traits evidenced by the responses
+
+## Strengths
+- 3–4 adaptive strengths
+
+## Challenges
+- 3–4 characteristic vulnerabilities
+
+## Therapeutic Considerations
+- Recommended approach and key focus areas
+
+## Important Notes
+- Caveats and contextual qualifications"""
+
+    return call_claude_api(prompt=prompt, max_tokens=2000)
+
+
+def run_full_analysis(responses_json, extra_info="", memories=None):
+    narrative = analyze_narrative(responses_json, extra_info, memories)
+    summary = analyze_summary(responses_json, extra_info, memories)
+    return narrative, summary
+
 
 def fallback_analysis(responses_json):
-    """
-    Simple fallback analysis when API is not available
-    """
     data = json.loads(responses_json)
-    
-    # Count responses by type
     type_counts = {}
     for response in data['responses']:
         ptype = response['selected_type']
         type_counts[ptype] = type_counts.get(ptype, 0) + 1
-    
-    # Find dominant type
+
     dominant_type = max(type_counts.items(), key=lambda x: x[1])
-    
-    # Calculate percentage
     total = len(data['responses'])
     percentage = (dominant_type[1] / total) * 100
-    
-    analysis = f"""## Personality Assessment Results
+
+    text = f"""## Personality Assessment Results
 
 **Assessment Date**: {data['timestamp']}
 
 ### Primary Personality Type: {dominant_type[0]}
-**Confidence**: {'High' if percentage > 60 else 'Medium' if percentage > 40 else 'Low'}  
+**Confidence**: {'High' if percentage > 60 else 'Medium' if percentage > 40 else 'Low'}
 **Indicator Strength**: {dominant_type[1]}/{total} responses ({percentage:.1f}%)
 
 ### Response Distribution:
 """
-    
     for ptype, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
         pct = (count / total) * 100
-        analysis += f"- **{ptype}**: {count} responses ({pct:.1f}%)\n"
-    
-    analysis += f"""
+        text += f"- **{ptype}**: {count} responses ({pct:.1f}%)\n"
 
+    text += f"""
 ### Analysis Summary:
 Based on {total} assessment questions, the dominant personality pattern is **{dominant_type[0]}**.
 
-**Note**: This is a simplified analysis. For complete psychological insights including therapeutic recommendations, pattern analysis, and detailed characteristics, an API key is required to enable full LLM analysis.
+**Note**: This is a simplified analysis. Set ANTHROPIC_API_KEY in .env for full LLM analysis.
 
 ### Questions Answered:
 """
-    
     for response in data['responses']:
-        analysis += f"\n- **Q{response['question_id']}** ({response['category']}): {response['selected_type']}"
-    
-    return analysis
+        text += f"\n- **Q{response['question_id']}** ({response['category']}): {response['selected_type']}"
+    return text
+
+
+# ---------------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------------
 
 def create_buttons_attributes(questions, input_responses=None):
-    """
-    Create question buttons 
-    """
     buttons = {}
-
-    if (questions is not None) and (len(questions) > 0):
+    if questions:
         for question in questions:
             responses = list(question['options'].values())
             random.shuffle(responses)
-
+            response = None
             if input_responses:
                 response = next((r for r in input_responses if r["question_id"] == question['id']), None)
-            else:
-                response = None
-    
             buttons[question['id']] = {
-                        "choices": responses,
-                        "label": "Select your response:",
-                        "interactive": True,
-                        "value": response["selected_answer"] if response else None
-            }            
-    
+                "choices": responses,
+                "label": "Select your response:",
+                "interactive": True,
+                "value": response["selected_answer"] if response else None
+            }
     return buttons
 
-def load_json_file(file):
-    """
-    Load and analyze a previously saved JSON assessment file
-    """
-    try:
-        if file is None:
-            return "⚠️ Please upload a JSON file.", "", *([None] * len(questions))
-        
-                # Handle different file types
-        if isinstance(file, bytes):
-            content = file
-        else:
-            content = file.read()
 
-        if isinstance(content, bytes):
-            content = content.decode('utf-8')
-        
-        # Parse JSON
-        assessment_data = json.loads(content)
-        
-        # Validate structure
-        if 'responses' not in assessment_data:
-            return "⚠️ Invalid JSON format. Missing 'responses' field.", "", *([None] * len(questions))
-        
-        # Generate JSON output for display
-        json_output = json.dumps(assessment_data, indent=2)
-        
-        # Get LLM analysis
-        #analysis = analyze_with_llm(json_output)
+# ---------------------------------------------------------------------------
+# Profile management
+# ---------------------------------------------------------------------------
 
-        buttons = create_buttons_attributes(questions, assessment_data['responses'])
-        # Extract button values in order of question IDs
-        button_values = [buttons[q['id']]['value'] for q in questions]
-        
-        return json_output, *button_values
-        
-    except json.JSONDecodeError:
-        return "⚠️ Invalid JSON file. Please upload a valid JSON assessment file.", "", *([None] * len(questions))
-    except Exception as e:
-        return f"⚠️ Error loading file: {str(e)}", "", *([None] * len(questions))
+def create_profile(assessment_data, summary, narrative="", subject_name="",
+                   extra_info="", memories=None, chat_history=None):
+    return {
+        "profile_version": "1.0",
+        "profile_id": str(uuid.uuid4()),
+        "subject_name": subject_name,
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+        "last_chat_at": None,
+        "assessment": assessment_data,
+        "analysis": summary,
+        "analysis_narrative": narrative,
+        "analysis_summary": summary,
+        "extra_info": extra_info,
+        "memories": memories or [],
+        "chat_history": chat_history or []
+    }
 
-def export_to_word(analysis_text, json_data, custom_filename=None, save_location=None):
-    """
-    Export assessment results to Word document and return as downloadable file
-    """
-    try:
-        from docx import Document
-        from docx.shared import Inches, Pt, RGBColor
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        import tempfile
-        
-        doc = Document()
-        
-        # Add title
-        title = doc.add_heading('Psychoanalytic Personality Assessment Results', 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        # Add timestamp
-        if json_data:
-            try:
-                data = json.loads(json_data)
-                timestamp = data.get('timestamp', datetime.now().isoformat())
-                date_para = doc.add_paragraph(f'Assessment Date: {timestamp}')
-                date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            except:
-                pass
-        
-        doc.add_paragraph()
-        
-        # Add analysis section
-        doc.add_heading('Analysis', level=1)
-        
-        # Parse and add analysis text (simple approach - split by lines)
-        for line in analysis_text.split('\n'):
-            if line.strip():
-                if line.startswith('##'):
-                    doc.add_heading(line.replace('#', '').strip(), level=1)
-                elif line.startswith('###'):
-                    doc.add_heading(line.replace('#', '').strip(), level=2)
-                elif line.startswith('**') and line.endswith('**'):
-                    p = doc.add_paragraph()
-                    run = p.add_run(line.replace('**', ''))
-                    run.bold = True
-                elif line.startswith('- '):
-                    doc.add_paragraph(line[2:], style='List Bullet')
-                else:
-                    doc.add_paragraph(line)
-        
-        # Add response details if JSON available
-        if json_data:
-            try:
-                data = json.loads(json_data)
-                doc.add_page_break()
-                doc.add_heading('Detailed Response Data', level=1)
-                
-                for response in data['responses']:
-                    p = doc.add_paragraph()
-                    p.add_run(f"Question {response['question_id']}: ").bold = True
-                    p.add_run(f"{response['category']}\n")
-                    p.add_run(f"Selected Type: ").bold = True
-                    p.add_run(f"{response['selected_type']}\n")
-                    if 'selected_answer' in response:
-                        p.add_run(f"Answer: ").bold = True
-                        p.add_run(f"{response['selected_answer']}\n")
-                    doc.add_paragraph()
-            except:
-                pass
-        
-        # Determine filename
-        if custom_filename and custom_filename.strip():
-            # Use custom filename, ensure .docx extension
-            filename = custom_filename.strip()
-            if not filename.endswith('.docx'):
-                filename += '.docx'
-        else:
-            # Use default timestamp filename
-            filename = f"assessment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-        
-        # Create temporary file for download
-        temp_file = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
-        doc.save(temp_file.name)
-        temp_file.close()
-        
-        return temp_file.name
-        
-    except ImportError:
-        # Fallback: install python-docx
-        os.system("pip install python-docx --break-system-packages -q")
-        return export_to_word(analysis_text, json_data, custom_filename, save_location)
-    except Exception as e:
-        return f"Error creating Word document: {str(e)}"
 
-def export_to_markdown(analysis_text, json_data, custom_filename=None, save_location=None):
-    """
-    Export assessment results to Markdown file and return as downloadable file
-    """
-    try:
-        import tempfile
-        
-        markdown_content = f"""# Psychoanalytic Personality Assessment Results
+def extract_memories(text):
+    pattern = r'\[MEMORY:\s*(.*?)\]'
+    memories = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL).strip()
+    return cleaned, [m.strip() for m in memories if m.strip()]
 
-"""
-        
-        # Add timestamp
-        if json_data:
-            try:
-                data = json.loads(json_data)
-                timestamp = data.get('timestamp', datetime.now().isoformat())
-                markdown_content += f"**Assessment Date**: {timestamp}\n\n"
-            except:
-                pass
-        
-        markdown_content += "---\n\n"
-        
-        # Add analysis
-        markdown_content += "## Analysis\n\n"
-        markdown_content += analysis_text + "\n\n"
-        
-        # Add response details if JSON available
-        if json_data:
-            try:
-                data = json.loads(json_data)
-                markdown_content += "---\n\n"
-                markdown_content += "## Detailed Response Data\n\n"
-                
-                for response in data['responses']:
-                    markdown_content += f"### Question {response['question_id']}: {response['category']}\n\n"
-                    markdown_content += f"**Selected Type**: {response['selected_type']}\n\n"
-                    if 'selected_answer' in response:
-                        markdown_content += f"**Answer**: {response['selected_answer']}\n\n"
-                    markdown_content += "---\n\n"
-            except:
-                pass
-        
-        # Determine filename
-        if custom_filename and custom_filename.strip():
-            # Use custom filename, ensure .md extension
-            filename = custom_filename.strip()
-            if not filename.endswith('.md'):
-                filename += '.md'
-        else:
-            # Use default timestamp filename
-            filename = f"assessment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        
-        # Create temporary file for download
-        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False)
-        temp_file.write(markdown_content)
-        temp_file.close()
-        
-        return temp_file.name
-        
-    except Exception as e:
-        return f"Error creating Markdown file: {str(e)}"
 
-def generate_suggested_filename(extension='docx'):
-    """
-    Generate a suggested filename with timestamp
-    """
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    return f"assessment_results_{timestamp}.{extension}"
+def format_memories_display(profile):
+    if not profile:
+        return "No memories saved yet."
+    mems = profile.get('memories', [])
+    if not mems:
+        return "No memories saved yet."
+    lines = []
+    for m in mems:
+        ts = m.get('timestamp', '')[:10]
+        lines.append(f"**[{ts}]** {m.get('content', '')}")
+    return "\n\n".join(lines)
 
-def update_filename_suggestion():
-    """
-    Update both filename suggestions when called
-    """
-    word_suggestion = generate_suggested_filename('docx')
-    md_suggestion = generate_suggested_filename('md')
-    return word_suggestion, md_suggestion
 
-def get_default_save_location():
-    """
-    Get OS-specific default save location
-    """
-    system = platform.system()
-    home = str(Path.home())
-    
-    if system == "Windows":
-        # Try Documents folder first, fall back to Desktop
-        documents = os.path.join(home, "Documents")
-        desktop = os.path.join(home, "Desktop")
-        downloads = os.path.join(home, "Downloads")
-        
-        if os.path.exists(documents):
-            return documents
-        elif os.path.exists(desktop):
-            return desktop
-        elif os.path.exists(downloads):
-            return downloads
-        else:
-            return home
-            
-    elif system == "Darwin":  # macOS
-        documents = os.path.join(home, "Documents")
-        downloads = os.path.join(home, "Downloads")
-        
-        if os.path.exists(documents):
-            return documents
-        elif os.path.exists(downloads):
-            return downloads
-        else:
-            return home
-            
-    else:  # Linux and others
-        documents = os.path.join(home, "Documents")
-        downloads = os.path.join(home, "Downloads")
-        
-        if os.path.exists(documents):
-            return documents
-        elif os.path.exists(downloads):
-            return downloads
-        else:
-            return home
+def build_chat_system_prompt(profile, chattiness=3, personality="Psychoanalytic"):
+    if chattiness <= 1:
+        style = "Be extremely concise — one or two sentences maximum unless the question genuinely requires more."
+    elif chattiness == 2:
+        style = "Be concise and focused — a short paragraph. Add one observation only if it truly adds value."
+    elif chattiness == 4:
+        style = "Be warm, conversational, and thorough. Connect themes, ask a thoughtful follow-up question."
+    elif chattiness >= 5:
+        style = (
+            "Be expansive, reflective, and deeply engaged. Offer rich insight, explore nuance, "
+            "draw connections across the profile, and invite genuine dialogue with follow-up questions."
+        )
+    else:
+        style = "Maintain a balanced tone — typically two to three paragraphs, substantive but not exhaustive."
 
-def get_save_location_suggestions():
-    """
-    Get a list of suggested save locations based on OS
-    """
-    system = platform.system()
-    home = str(Path.home())
-    suggestions = []
-    
-    # Common locations across platforms
-    common_paths = [
-        os.path.join(home, "Documents"),
-        os.path.join(home, "Downloads"),
-        os.path.join(home, "Desktop"),
+    persona = CHATBOT_PERSONALITIES.get(personality, CHATBOT_PERSONALITIES["Psychoanalytic"])
+
+    lines = [
+        "You are a psychoanalytic consultant engaging with someone who has completed a formal personality assessment.",
+        "",
+        f"Therapeutic approach: {persona['prompt']}",
+        "",
+        f"Response length: {style}",
+        "",
+        "MEMORY INSTRUCTIONS — critical:",
+        "Actively capture what the person reveals about themselves during conversation.",
+        "When they share concrete information — specific behaviours, relationships, experiences,",
+        "recurring patterns, significant events, or how they perceive themselves — save it immediately:",
+        "[MEMORY: <brief factual observation about the person>]",
+        "Include multiple [MEMORY: ...] tags as needed. Err on the side of saving too much.",
+        "Only skip if the person shared nothing new in this exchange.",
+        "",
+        "## Current Profile",
+        "",
     ]
-    
-    # Add existing paths
-    for path in common_paths:
-        if os.path.exists(path):
-            suggestions.append(path)
-    
-    # Add home directory
-    suggestions.append(home)
-    
-    # Add current directory for containers/servers
-    suggestions.append("/mnt/user-data/outputs")
-    
-    return suggestions
 
-def validate_save_location(path):
-    """
-    Validate if a path is writable
-    Returns: (is_valid, error_message, normalized_path)
-    """
-    if not path or not path.strip():
-        return False, "Path cannot be empty", None
-    
-    path = path.strip()
-    
-    # Expand user home directory
-    path = os.path.expanduser(path)
-    
-    # Convert to absolute path
-    path = os.path.abspath(path)
-    
-    # Check if path exists
-    if not os.path.exists(path):
-        return False, f"Path does not exist: {path}", None
-    
-    # Check if it's a directory
-    if not os.path.isdir(path):
-        return False, f"Path is not a directory: {path}", None
-    
-    # Check if writable
-    if not os.access(path, os.W_OK):
-        return False, f"Path is not writable: {path}", None
-    
-    return True, "", path
+    if profile.get('subject_name'):
+        lines.append(f"**Name**: {profile['subject_name']}")
 
-def create_full_filepath(directory, filename):
-    """
-    Combine directory and filename, ensuring proper path
-    """
-    if not directory or not directory.strip():
-        directory = "/mnt/user-data/outputs"
-    
-    # Validate and normalize directory
-    is_valid, error, normalized_dir = validate_save_location(directory)
-    if not is_valid:
-        # Fall back to default output location
-        normalized_dir = "/mnt/user-data/outputs"
-    
-    # Ensure filename has proper extension
-    if not filename.endswith('.docx') and not filename.endswith('.md'):
-        # Extension will be added by export functions
-        pass
-    
-    return os.path.join(normalized_dir, filename)
+    lines.append(f"**Assessment Date**: {profile.get('assessment', {}).get('timestamp', 'Unknown')}")
+    lines.append("")
+    lines.append("## Personality Analysis (Summary)")
+    lines.append(profile.get('analysis_summary', profile.get('analysis', 'No analysis available yet.')))
+
+    if profile.get('extra_info', '').strip():
+        lines.append("")
+        lines.append("## Additional Information Provided")
+        lines.append(profile['extra_info'])
+
+    if profile.get('memories'):
+        lines.append("")
+        lines.append("## Saved Memories from Prior Conversations")
+        for m in profile['memories']:
+            ts = m.get('timestamp', '')[:10]
+            lines.append(f"- [{ts}] {m.get('content', '')}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Report view toggle
+# ---------------------------------------------------------------------------
+
+def switch_report_view(view_choice, profile):
+    if not profile:
+        return ""
+    if view_choice == "Summary":
+        return profile.get("analysis_summary", profile.get("analysis", "No summary available."))
+    return profile.get("analysis_narrative", profile.get("analysis", "No full report available."))
+
+
+# ---------------------------------------------------------------------------
+# Assessment processing
+# ---------------------------------------------------------------------------
 
 def process_assessment(*args):
-    """
-    Process all responses and generate analysis
-    """
-    # Collect all responses
+    radio_values = args[:len(questions)]
+    extra_info = args[len(questions)] if len(args) > len(questions) else ""
+    existing_profile = args[len(questions) + 1] if len(args) > len(questions) + 1 else {}
+
     responses = []
-    args_list = list(args)
-    for i, answer in enumerate(args):
-        if answer:  # Only include answered questions
+    for i, answer in enumerate(radio_values):
+        if answer:
             q = questions[i]
-            # Find which type was selected
             selected_type = None
             for ptype, text in q['options'].items():
                 if text == answer:
                     selected_type = ptype
                     break
-            
             responses.append({
                 "question_id": q['id'],
                 "category": q['category'],
@@ -786,309 +694,816 @@ def process_assessment(*args):
                 "selected_answer": answer,
                 "selected_type": selected_type
             })
-    
-    # Check if all questions answered
+
     if len(responses) < len(questions):
-        return "⚠️ Please answer all questions before submitting.", ""
-    
-    # Create JSON structure
+        return "⚠️ Please answer all questions before submitting.", "", {}, "Full Report"
+
     assessment_data = {
         "timestamp": datetime.now().isoformat(),
         "total_questions": len(questions),
         "responses": responses
     }
-    
     json_output = json.dumps(assessment_data, indent=2)
-    
-    # Get LLM analysis
-    analysis = analyze_with_llm(json_output)
-    
-    return analysis, json_output
 
-def process_export_to_word_with_LLM(analysis_text, json_data, custom_filename, save_location):
-    """
-    Process export to Word with LLM analysis
-    """
-    filepath = create_full_filepath(save_location, custom_filename)
-    prompt = """re-write the following analysis text as a professional report formated so it can be written to a file that is a Word document:\n\n""" + analysis_text
+    memories = existing_profile.get('memories', []) if existing_profile else []
+    extra_info = extra_info or (existing_profile.get('extra_info', '') if existing_profile else '')
 
-    result = call_claude_api(prompt)
+    narrative, summary = run_full_analysis(json_output, extra_info=extra_info, memories=memories)
 
-    return result
+    subject_name = existing_profile.get('subject_name', '') if existing_profile else ''
+    profile = create_profile(assessment_data, summary, narrative=narrative,
+                             subject_name=subject_name, extra_info=extra_info, memories=memories)
 
-# Create Gradio interface
+    return narrative, json_output, profile, "Full Report"
+
+
+# ---------------------------------------------------------------------------
+# Voice: speech-to-text and text-to-speech
+# ---------------------------------------------------------------------------
+
+def transcribe_speech(audio_path):
+    """Convert recorded audio to text. Uses OpenAI Whisper if available, else Google STT."""
+    if audio_path is None:
+        return ""
+
+    # Try OpenAI Whisper first (if both key and package are present)
+    if os.getenv('OPENAI_API_KEY'):
+        try:
+            import openai
+            client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+            with open(audio_path, 'rb') as f:
+                transcript = client.audio.transcriptions.create(model="whisper-1", file=f)
+            return transcript.text.strip()
+        except ImportError:
+            pass  # openai package not installed — fall through to Google STT
+        except Exception as e:
+            return f"⚠️ Transcription error: {str(e)}"
+
+    # Fallback: Google STT via SpeechRecognition (free, no key needed)
+    try:
+        import speech_recognition as sr
+        r = sr.Recognizer()
+        with sr.AudioFile(audio_path) as source:
+            audio_data = r.record(source)
+        return r.recognize_google(audio_data).strip()
+    except Exception as e:
+        return f"⚠️ Transcription error: {str(e)}"
+
+
+def speak_response(text, personality="Psychoanalytic"):
+    """Convert text to speech and return path to audio file."""
+    try:
+        from gtts import gTTS
+
+        # Strip markdown and memory tags for cleaner speech
+        clean = re.sub(r'\[MEMORY:.*?\]', '', text, flags=re.IGNORECASE | re.DOTALL)
+        clean = re.sub(r'[#*`_]', '', clean)
+        clean = re.sub(r'\n+', ' ', clean).strip()
+        if not clean:
+            return None
+
+        # Cap length to avoid very long TTS calls
+        if len(clean) > 2500:
+            clean = clean[:2500] + "..."
+
+        cfg = CHATBOT_PERSONALITIES.get(personality, CHATBOT_PERSONALITIES["Psychoanalytic"])
+        tts = gTTS(text=clean, lang='en', tld=cfg['tts_tld'], slow=cfg['tts_slow'])
+
+        tmp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+        tts.save(tmp.name)
+        tmp.close()
+        return tmp.name
+    except Exception:
+        return None  # Fail silently — text response still visible
+
+
+# ---------------------------------------------------------------------------
+# Chat initialisation
+# ---------------------------------------------------------------------------
+
+def generate_chat_welcome(profile):
+    name = profile.get('subject_name', '')
+    last_chat = profile.get('last_chat_at')
+    analysis_summary = profile.get('analysis_summary', profile.get('analysis', ''))
+    memories = profile.get('memories', [])
+
+    if last_chat:
+        try:
+            dt = datetime.fromisoformat(last_chat)
+            time_context = f"Their last chat session was on {dt.strftime('%A, %B %d at %I:%M %p')}."
+        except Exception:
+            time_context = "They have chatted before."
+    else:
+        time_context = "This is their first chat session."
+
+    memory_context = ""
+    if memories:
+        recent = memories[-5:]
+        memory_context = "\n\nKey things remembered from previous conversations:\n" + \
+                         "\n".join(f"- {m['content']}" for m in recent)
+
+    name_line = f"Their name is {name}." if name else "Their name is not known."
+
+    prompt = f"""You are a psychoanalytic consultant beginning a chat session with a client.
+
+{name_line}
+{time_context}
+
+Their personality profile summary:
+{analysis_summary[:1200]}
+{memory_context}
+
+Write a warm, personalised opening message. It should:
+- Greet them {'by name' if name else 'warmly'}
+- If this is a return visit, acknowledge the time since the last session naturally, mentioning the date
+- If there are prior memories, reference a relevant theme briefly and naturally (not verbatim)
+- Invite them into the conversation by naming something genuinely interesting from their profile
+- Close with a single thoughtful, open-ended question specific to their personality type
+
+Keep it to 2–3 paragraphs. Be warm and human, not clinical. Do not include [MEMORY: ...] tags."""
+
+    return call_claude_api(prompt=prompt, max_tokens=500)
+
+
+def initialize_chat(history, profile):
+    """Generate welcome when Chat tab is opened, only if chat is empty."""
+    if history:
+        return history, profile
+
+    if not profile or not profile.get('assessment'):
+        return [{
+            "role": "assistant",
+            "content": (
+                "👋 Welcome! Please complete the personality assessment first "
+                "(Assessment tab), then come back here to chat about your profile."
+            )
+        }], profile
+
+    welcome_msg = generate_chat_welcome(profile)
+
+    profile = dict(profile)
+    profile['last_chat_at'] = datetime.now().isoformat()
+    profile['updated_at'] = datetime.now().isoformat()
+
+    new_history = [{"role": "assistant", "content": welcome_msg}]
+    profile['chat_history'] = new_history
+
+    return new_history, profile
+
+
+# ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
+
+def chat_with_profile(message, history, profile, chattiness=3,
+                      personality="Psychoanalytic", voice_enabled=False):
+    if not message or not message.strip():
+        return history, "", profile, format_memories_display(profile), None
+
+    if not profile or not profile.get('assessment'):
+        new_history = list(history) + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": (
+                "⚠️ Please complete a personality assessment first (Assessment tab), "
+                "then return here to chat about your profile."
+            )}
+        ]
+        return new_history, "", profile, format_memories_display(profile), None
+
+    system = build_chat_system_prompt(profile, chattiness=int(chattiness), personality=personality)
+    messages = [{"role": h["role"], "content": h["content"]} for h in history]
+    messages.append({"role": "user", "content": message})
+
+    response = call_claude_api(messages=messages, system=system, max_tokens=1500)
+    cleaned_response, new_memories = extract_memories(response)
+
+    profile = dict(profile)
+    if new_memories:
+        existing = list(profile.get('memories', []))
+        for mem in new_memories:
+            existing.append({"timestamp": datetime.now().isoformat(), "content": mem})
+        profile['memories'] = existing
+        profile['updated_at'] = datetime.now().isoformat()
+
+    new_history = list(history) + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": cleaned_response}
+    ]
+    profile['chat_history'] = new_history
+
+    voice_audio = speak_response(cleaned_response, personality) if voice_enabled else None
+
+    return new_history, "", profile, format_memories_display(profile), voice_audio
+
+
+def handle_voice_input(audio_path, history, profile, chattiness, personality, voice_enabled):
+    """Transcribe microphone input, send to chat, return response (always with voice)."""
+    if audio_path is None:
+        return history, None, profile, format_memories_display(profile)
+
+    text = transcribe_speech(audio_path)
+
+    if not text or text.startswith("⚠️"):
+        error_msg = text or "⚠️ Could not transcribe audio. Please try again."
+        new_history = list(history) + [{"role": "assistant", "content": error_msg}]
+        return new_history, None, profile, format_memories_display(profile)
+
+    # Voice input always produces voice output
+    new_history, _, profile, memories_disp, voice_audio = chat_with_profile(
+        text, history, profile, chattiness, personality, voice_enabled=True
+    )
+    return new_history, voice_audio, profile, memories_disp
+
+
+def reanalyze_from_chat(history, profile):
+    if not profile or not profile.get('assessment'):
+        msg = "⚠️ No assessment data found. Please complete a personality assessment first."
+        return list(history) + [{"role": "assistant", "content": msg}], profile
+
+    json_data = json.dumps(profile['assessment'], indent=2)
+    narrative, summary = run_full_analysis(
+        json_data,
+        extra_info=profile.get('extra_info', ''),
+        memories=profile.get('memories', [])
+    )
+
+    profile = dict(profile)
+    profile['analysis_narrative'] = narrative
+    profile['analysis_summary'] = summary
+    profile['analysis'] = summary
+    profile['updated_at'] = datetime.now().isoformat()
+
+    chat_msg = (
+        "I've re-analyzed your personality profile, incorporating all additional information "
+        "and insights from our conversations. Here's the updated full report:\n\n" + narrative
+    )
+    new_history = list(history) + [{"role": "assistant", "content": chat_msg}]
+    profile['chat_history'] = new_history
+    return new_history, profile
+
+
+def clear_memories(profile):
+    if not profile:
+        return profile, "No memories saved yet."
+    profile = dict(profile)
+    profile['memories'] = []
+    profile['updated_at'] = datetime.now().isoformat()
+    return profile, "No memories saved yet."
+
+
+# ---------------------------------------------------------------------------
+# Profile save / load
+# ---------------------------------------------------------------------------
+
+def _profile_to_saveable(profile):
+    """Remove narrative (not stored) and ensure summary is canonical analysis."""
+    p = dict(profile)
+    p.pop('analysis_narrative', None)
+    p['analysis'] = p.get('analysis_summary', p.get('analysis', ''))
+    return p
+
+
+def save_profile_as_json(profile, subject_name, filename_input):
+    if not profile or not profile.get('assessment'):
+        return None, "⚠️ No profile to save. Complete an assessment first."
+
+    profile = dict(profile)
+    if subject_name and subject_name.strip():
+        profile['subject_name'] = subject_name.strip()
+    profile['updated_at'] = datetime.now().isoformat()
+
+    saveable = _profile_to_saveable(profile)
+
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8')
+    json.dump(saveable, tmp, indent=2)
+    tmp.close()
+
+    if filename_input and filename_input.strip():
+        display_name = filename_input.strip()
+        if not display_name.endswith('.json'):
+            display_name += '.json'
+    else:
+        name = profile.get('subject_name', '') or 'profile'
+        safe = "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        display_name = f"personality_profile_{safe}_{ts}.json" if safe else f"personality_profile_{ts}.json"
+
+    return tmp.name, f"✅ Profile ready: **{display_name}**"
+
+
+def load_profile_file(filepath):
+    num_q = len(questions)
+    empty = [None] * num_q
+
+    try:
+        if filepath is None:
+            return {}, "⚠️ Please upload a file.", "", "", "", "", [], *empty
+
+        original_filename = Path(filepath).name
+
+        with open(filepath, encoding='utf-8') as f:
+            data = json.load(f)
+
+        if 'profile_version' in data:
+            profile = data
+            assessment_data = data.get('assessment', {})
+            analysis_summary = data.get('analysis_summary', data.get('analysis', ''))
+            analysis_narrative = data.get('analysis_narrative', '')
+            extra_info = data.get('extra_info', '')
+            chat_history = data.get('chat_history', [])
+            profile['analysis_summary'] = analysis_summary
+            profile['analysis_narrative'] = analysis_narrative
+        elif 'responses' in data:
+            assessment_data = data
+            analysis_summary = ''
+            analysis_narrative = ''
+            extra_info = ''
+            chat_history = []
+            profile = create_profile(assessment_data, analysis_summary)
+        else:
+            return {}, "⚠️ Invalid file format.", "", "", "", "", [], *empty
+
+        json_output = json.dumps(assessment_data, indent=2)
+        buttons = create_buttons_attributes(questions, assessment_data.get('responses', []))
+        button_values = [buttons[q['id']]['value'] for q in questions]
+
+        subject_name = profile.get('subject_name', '')
+        status = f"✅ Profile loaded: **{subject_name or 'unnamed'}**"
+
+        return (profile, status, analysis_summary, json_output, extra_info,
+                original_filename, chat_history, *button_values)
+
+    except json.JSONDecodeError:
+        return {}, "⚠️ Invalid JSON file.", "", "", "", "", [], *empty
+    except Exception as e:
+        return {}, f"⚠️ Error loading file: {str(e)}", "", "", "", "", [], *empty
+
+
+# ---------------------------------------------------------------------------
+# Export functions
+# ---------------------------------------------------------------------------
+
+def export_to_word(analysis_text, json_data, custom_filename=None, save_location=None):
+    try:
+        from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc = Document()
+        title = doc.add_heading('Psychoanalytic Personality Assessment Results', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        if json_data:
+            try:
+                data = json.loads(json_data)
+                p = doc.add_paragraph(f'Assessment Date: {data.get("timestamp", "")}')
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
+
+        doc.add_paragraph()
+        doc.add_heading('Analysis', level=1)
+
+        for line in analysis_text.split('\n'):
+            if line.strip():
+                if line.startswith('###'):
+                    doc.add_heading(line.replace('#', '').strip(), level=2)
+                elif line.startswith('##'):
+                    doc.add_heading(line.replace('#', '').strip(), level=1)
+                elif line.startswith('**') and line.endswith('**'):
+                    p = doc.add_paragraph()
+                    p.add_run(line.replace('**', '')).bold = True
+                elif line.startswith('- '):
+                    doc.add_paragraph(line[2:], style='List Bullet')
+                else:
+                    doc.add_paragraph(line)
+
+        if json_data:
+            try:
+                data = json.loads(json_data)
+                doc.add_page_break()
+                doc.add_heading('Detailed Response Data', level=1)
+                for resp in data['responses']:
+                    p = doc.add_paragraph()
+                    p.add_run(f"Question {resp['question_id']}: ").bold = True
+                    p.add_run(f"{resp['category']}\n")
+                    p.add_run("Selected Type: ").bold = True
+                    p.add_run(f"{resp['selected_type']}\n")
+                    if 'selected_answer' in resp:
+                        p.add_run("Answer: ").bold = True
+                        p.add_run(f"{resp['selected_answer']}\n")
+                    doc.add_paragraph()
+            except Exception:
+                pass
+
+        filename = (custom_filename.strip() if custom_filename and custom_filename.strip()
+                    else f"assessment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx")
+        if not filename.endswith('.docx'):
+            filename += '.docx'
+
+        tmp = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
+        doc.save(tmp.name)
+        tmp.close()
+        return tmp.name
+
+    except ImportError:
+        os.system("pip install python-docx --break-system-packages -q")
+        return export_to_word(analysis_text, json_data, custom_filename, save_location)
+    except Exception as e:
+        return f"Error creating Word document: {str(e)}"
+
+
+def export_to_markdown(analysis_text, json_data, custom_filename=None, save_location=None):
+    try:
+        md = "# Psychoanalytic Personality Assessment Results\n\n"
+        if json_data:
+            try:
+                data = json.loads(json_data)
+                md += f"**Assessment Date**: {data.get('timestamp', '')}\n\n"
+            except Exception:
+                pass
+
+        md += "---\n\n## Analysis\n\n" + analysis_text + "\n\n"
+
+        if json_data:
+            try:
+                data = json.loads(json_data)
+                md += "---\n\n## Detailed Response Data\n\n"
+                for resp in data['responses']:
+                    md += f"### Question {resp['question_id']}: {resp['category']}\n\n"
+                    md += f"**Selected Type**: {resp['selected_type']}\n\n"
+                    if 'selected_answer' in resp:
+                        md += f"**Answer**: {resp['selected_answer']}\n\n"
+                    md += "---\n\n"
+            except Exception:
+                pass
+
+        filename = (custom_filename.strip() if custom_filename and custom_filename.strip()
+                    else f"assessment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+        if not filename.endswith('.md'):
+            filename += '.md'
+
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8')
+        tmp.write(md)
+        tmp.close()
+        return tmp.name
+    except Exception as e:
+        return f"Error creating Markdown file: {str(e)}"
+
+
+def generate_suggested_filename(extension='docx'):
+    return f"assessment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{extension}"
+
+
+def get_default_save_location():
+    home = str(Path.home())
+    for candidate in [os.path.join(home, "Documents"), os.path.join(home, "Desktop"),
+                      os.path.join(home, "Downloads")]:
+        if os.path.exists(candidate):
+            return candidate
+    return home
+
+
+def get_save_location_suggestions():
+    home = str(Path.home())
+    suggestions = []
+    for p in [os.path.join(home, "Documents"), os.path.join(home, "Downloads"),
+              os.path.join(home, "Desktop")]:
+        if os.path.exists(p):
+            suggestions.append(p)
+    suggestions.append(home)
+    return suggestions
+
+
+# ---------------------------------------------------------------------------
+# Gradio UI
+# ---------------------------------------------------------------------------
+
 with gr.Blocks(title="Psychoanalytic Personality Assessment") as demo:
 
-    
+    profile_state = gr.State({})
+
     gr.Markdown("""
-    # 🧠 Psychoanalytic Personality Assessment
-    
-    This comprehensive assessment uses psychoanalytic theory to identify personality patterns. 
-    Answer all 18 questions honestly based on how you typically think, feel, and behave.
-    
-    **Instructions**: For each question, select the response that best describes you.
-    """)
-    
+# 🧠 Psychoanalytic Personality Assessment
+
+This comprehensive assessment uses psychoanalytic theory to identify personality patterns.
+Answer all 18 questions honestly based on how you typically think, feel, and behave.
+""")
+
     with gr.Tabs():
-        # Tab 1: Assessment
+
+        # ── Tab 1: Assessment ────────────────────────────────────────────────
         with gr.Tab("📝 Assessment"):
-            # Store radio button components
             buttons = create_buttons_attributes(questions)
             radio_buttons = []
-            
+
             with gr.Tabs():
-                # Create tabs for better organization (6 questions per tab)
                 for tab_num in range(3):
-                    with gr.Tab(f"Questions {tab_num*6 + 1}-{min((tab_num+1)*6, 18)}"):
-                        start_idx = tab_num * 6
-                        end_idx = min((tab_num + 1) * 6, len(questions))
-                        
+                    start_idx = tab_num * 6
+                    end_idx = min((tab_num + 1) * 6, len(questions))
+                    with gr.Tab(f"Questions {start_idx + 1}–{end_idx}"):
                         for q in questions[start_idx:end_idx]:
                             with gr.Group():
                                 gr.Markdown(f"### Question {q['id']}: {q['category']}")
                                 gr.Markdown(f"**{q['question']}**")
-                                
-                                responses = list(q['options'].values())
-                                # Shuffle responses to avoid bias
-                                responses = list(q['options'].values())
-                                random.shuffle(responses)
-
-                                # Create radio button with all options
                                 radio = gr.Radio(
                                     choices=buttons[q['id']]['choices'],
                                     label=buttons[q['id']]['label'],
-                                    interactive=buttons[q['id']]['interactive'],
-                                    value=buttons[q['id']]['value']
+                                    interactive=True,
+                                    value=None
                                 )
                                 radio_buttons.append(radio)
-            
+
             gr.Markdown("---")
-            
+            gr.Markdown("## 📝 Additional Information")
+            gr.Markdown(
+                "Optionally provide extra context before running the analysis. "
+                "Existing profile context and conversation memories are included automatically."
+            )
+            extra_info_input = gr.Textbox(
+                label="Additional Information",
+                placeholder="Background, observed behaviours, history, or any other relevant context…",
+                lines=4
+            )
+
+            gr.Markdown("---")
             with gr.Row():
                 submit_btn = gr.Button("📊 Analyze My Personality", variant="primary", size="lg")
                 clear_btn = gr.Button("🔄 Clear All Responses", size="lg")
-            
+
             gr.Markdown("---")
-            
-            # Results section
             gr.Markdown("## 📋 Assessment Results")
-            
+
+            with gr.Row():
+                report_view_toggle = gr.Radio(
+                    choices=["Full Report", "Summary"],
+                    value="Full Report",
+                    label="Report View",
+                    interactive=True
+                )
+
             with gr.Row():
                 with gr.Column(scale=2):
                     analysis_output = gr.Markdown(label="Personality Analysis")
                 with gr.Column(scale=1):
                     json_output = gr.Code(label="Response Data (JSON)", language="json")
-            
-           
-            
-            # Button actions for new assessment
-        
-        # Tab 2: Upload Previous Results
-        with gr.Tab("📂 Upload Previous Assessment"):
-            gr.Markdown("""
-            ## Upload and Analyze Previous Results
-            
-            Upload a previously saved JSON assessment file to re-analyze the results or view them again.
-            """)
-            
-            with gr.Row():
-                json_file_upload = gr.File(
-                    label="Upload previously saved Assessment",
-                    file_types=[".json"],
-                    type="binary"
-                )
 
-                json_file_upload.change(
-                    fn=load_json_file,
-                    inputs=[json_file_upload],
-                    outputs=[json_output, *radio_buttons]
+        # ── Tab 2: Profile ───────────────────────────────────────────────────
+        with gr.Tab("👤 Profile"):
+            gr.Markdown("## Save & Load Profile")
+            gr.Markdown(
+                "A **profile** bundles assessment responses, the summary analysis, additional information, "
+                "chat memories and conversation history. The narrative report is generated fresh each session "
+                "and is not stored."
             )
-            """      
+
+            gr.Markdown("### 💾 Save Current Profile")
             with gr.Row():
-                analyze_upload_btn = gr.Button("🔍 Analyze Uploaded Assessment", variant="primary", size="lg")
-                clear_upload_btn = gr.Button("🔄 Clear", size="lg")
+                subject_name_input = gr.Textbox(label="Subject Name (optional)",
+                                                placeholder="Enter a name for this profile…")
+            with gr.Row():
+                profile_filename_input = gr.Textbox(
+                    label="Save As (filename)",
+                    placeholder="personality_profile.json",
+                    info="Uploading a profile pre-fills this with the source filename."
+                )
+            with gr.Row():
+                save_profile_btn = gr.Button("💾 Save Profile as JSON", variant="primary", size="lg")
+
+            profile_save_status = gr.Markdown("")
+            profile_file_output = gr.File(label="Download Profile JSON")
 
             gr.Markdown("---")
-            gr.Markdown("## 📋 Analysis Results")
-            
+            gr.Markdown("### 📂 Load an Existing Profile")
+            gr.Markdown(
+                "Upload a previously saved profile JSON to restore the assessment, summary analysis, "
+                "additional information, memories, and chat history."
+            )
+            profile_file_upload = gr.File(label="Upload Profile JSON", file_types=[".json"])
+            profile_load_status = gr.Markdown("")
+
+        # ── Tab 3: Chat ──────────────────────────────────────────────────────
+        with gr.Tab("💬 Chat") as chat_tab:
+            gr.Markdown("## Chat with Your Profile")
+            gr.Markdown(
+                "The AI has full access to your personality profile and remembers what you share. "
+                "Speak or type — voice input always gets a spoken response."
+            )
+
             with gr.Row():
-                with gr.Column(scale=2):
-                    uploaded_analysis_output = gr.Markdown(label="Personality Analysis")
+                # ── Left: conversation area ──────────────────────────────────
+                with gr.Column(scale=3):
+                    chatbot = gr.Chatbot(
+                        label="Conversation",
+                        height=460,
+                        render_markdown=True
+                    )
+
+                    gr.Markdown(
+                        "**🎤 Voice input** — click Record, speak, then click Stop. "
+                        "Your message is transcribed and sent automatically. "
+                        "If the microphone is unavailable you can upload a recorded audio file instead. "
+                        "*(Grant microphone access in your browser when prompted.)*"
+                    )
+                    with gr.Row():
+                        voice_input = gr.Audio(
+                            sources=["microphone", "upload"],
+                            type="filepath",
+                            label="🎤 Voice Input (record or upload)"
+                        )
+                        voice_output = gr.Audio(
+                            label="🔊 AI Voice Response",
+                            autoplay=True,
+                            interactive=False,
+                            sources=[]
+                        )
+
+                    chat_input = gr.Textbox(
+                        label="Type a message  (Enter to send)",
+                        placeholder="Ask about your personality, explore a pattern, share more context…",
+                        lines=1,
+                        max_lines=6
+                    )
+
+                    with gr.Row():
+                        chat_clear_btn = gr.Button("Clear Chat")
+                        chat_reanalyze_btn = gr.Button(
+                            "🔄 Re-analyze with Chat Context", variant="secondary"
+                        )
+
+                # ── Right: controls ─────────────────────────────────────────
                 with gr.Column(scale=1):
-                    uploaded_json_output = gr.Code(label="Response Data (JSON)", language="json")
-            
-            # Export buttons for uploaded file
-            gr.Markdown("### 💾 Export Results")
-            
-            # Save location selector
-            with gr.Row():
-                upload_save_location_input = gr.Textbox(
-                    label="📁 Save Location",
-                    placeholder=get_default_save_location(),
-                    value=get_default_save_location(),
-                    info=f"Default: {get_default_save_location()} | Click to edit path"
-                )
-            
-            with gr.Row():
-                with gr.Column():
-                    gr.Markdown("**Common Locations:**")
-                    location_suggestions = get_save_location_suggestions()
-                    for loc in location_suggestions[:4]:  # Show top 4
-                        gr.Markdown(f"• `{loc}`")
-            
-            with gr.Row():
-                with gr.Column():
-                    upload_word_filename_input = gr.Textbox(
-                        label="Word Filename (optional)",
-                        placeholder="assessment_results_20241218_143022.docx",
-                        value=generate_suggested_filename('docx'),
-                        info="Filename only (no path). Extension .docx added automatically."
+                    chatbot_personality = gr.Dropdown(
+                        choices=PERSONALITY_NAMES,
+                        value="Psychoanalytic",
+                        label="Chatbot Personality",
+                        info="Changes the AI's therapeutic style and voice accent."
                     )
-                    upload_export_word_btn = gr.Button("📄 Export to Word (.docx)", size="lg")
-                with gr.Column():
-                    upload_md_filename_input = gr.Textbox(
-                        label="Markdown Filename (optional)",
-                        placeholder="assessment_results_20241218_143022.md",
-                        value=generate_suggested_filename('md'),
-                        info="Filename only (no path). Extension .md added automatically."
+                    chattiness_slider = gr.Slider(
+                        minimum=1, maximum=5, value=3, step=1,
+                        label="Response Length",
+                        info="1 = Very concise  ·  3 = Balanced  ·  5 = Expansive"
                     )
-                    upload_export_md_btn = gr.Button("📝 Export to Markdown (.md)", size="lg")
-            
-            gr.Markdown("**💡 Tip**: Files save to the location above. Default is your Documents folder.")
-            
-            with gr.Row():
-                upload_word_file_output = gr.File(label="Word Document")
-                upload_md_file_output = gr.File(label="Markdown Document")
-            """
-            """
-            # Button actions for uploaded file
-            analyze_upload_btn.click(
-                fn=load_json_file,
-                inputs=[json_file_upload],
-                outputs=[uploaded_analysis_output, uploaded_json_output, *radio_buttons]
-            )
-            
-            clear_upload_btn.click(
-                fn=lambda: [None, "", "", get_default_save_location(), generate_suggested_filename('docx'), generate_suggested_filename('md'), None, None],
-                inputs=None,
-                outputs=[json_file_upload, uploaded_analysis_output, uploaded_json_output, 
-                        upload_save_location_input, upload_word_filename_input, upload_md_filename_input,
-                        upload_word_file_output, upload_md_file_output]
-            )
-            
-            upload_export_word_btn.click(
-                fn=export_to_word,
-                inputs=[uploaded_analysis_output, uploaded_json_output, upload_word_filename_input, upload_save_location_input],
-                outputs=[upload_word_file_output]
-            )
-            
-            upload_export_md_btn.click(
-                fn=export_to_markdown,
-                inputs=[uploaded_analysis_output, uploaded_json_output, upload_md_filename_input, upload_save_location_input],
-                outputs=[upload_md_file_output]
-            )
-            """
-    
-        with gr.Tab("📝 Save results"):
-             # Export buttons
-            gr.Markdown("### 💾 Save Results")
-            
-            # Save location selector
+                    voice_enabled_checkbox = gr.Checkbox(
+                        label="🔊 Speak text replies",
+                        value=False,
+                        info="Enable to hear spoken responses when typing (voice input always speaks)."
+                    )
+                    gr.Markdown("---")
+                    gr.Markdown("### 🧠 Saved Memories")
+                    gr.Markdown(
+                        "Meaningful insights the AI saves from your conversation "
+                        "— included in future analyses."
+                    )
+                    memories_display = gr.Markdown("No memories saved yet.")
+                    clear_memories_btn = gr.Button("🗑️ Clear Memories", size="sm")
+
+        # ── Tab 4: Save Results ──────────────────────────────────────────────
+        with gr.Tab("📤 Save Results"):
+            gr.Markdown("### 💾 Export Analysis")
+
             with gr.Row():
                 save_location_input = gr.Textbox(
                     label="📁 Save Location",
-                    placeholder=get_default_save_location(),
                     value=get_default_save_location(),
-                    info=f"Default: {get_default_save_location()} | Click to edit path"
+                    info=f"Default: {get_default_save_location()}"
                 )
-            
+
             with gr.Row():
                 with gr.Column():
                     gr.Markdown("**Common Locations:**")
-                    location_suggestions = get_save_location_suggestions()
-                    for loc in location_suggestions[:4]:  # Show top 4
+                    for loc in get_save_location_suggestions()[:4]:
                         gr.Markdown(f"• `{loc}`")
-                
+
             with gr.Row():
                 with gr.Column():
                     word_filename_input = gr.Textbox(
-                        label="Word Filename (optional)",
-                        placeholder="assessment_results_20241218_143022.docx",
+                        label="Word Filename",
                         value=generate_suggested_filename('docx'),
-                        info="Filename only (no path). Extension .docx added automatically."
+                        info="Extension .docx added automatically."
                     )
                     export_word_btn = gr.Button("📄 Export to Word (.docx)", size="lg")
                 with gr.Column():
                     md_filename_input = gr.Textbox(
-                        label="Markdown Filename (optional)",
-                        placeholder="assessment_results_20241218_143022.md",
+                        label="Markdown Filename",
                         value=generate_suggested_filename('md'),
-                        info="Filename only (no path). Extension .md added automatically."
+                        info="Extension .md added automatically."
                     )
                     export_md_btn = gr.Button("📝 Export to Markdown (.md)", size="lg")
-            
-            gr.Markdown("**💡 Tip**: Files save to the location above. Default is your Documents folder.")
-            
+
+            gr.Markdown("**💡 Tip**: Files are downloaded via your browser.")
+
             with gr.Row():
                 word_file_output = gr.File(label="Word Document")
                 md_file_output = gr.File(label="Markdown Document")
 
-                        
-                export_word_btn.click(
-                    fn=process_export_to_word_with_LLM,
-                    inputs=[analysis_output, json_output, word_filename_input, save_location_input],
-                    outputs=[word_file_output]
-                )
-                
-                export_md_btn.click(
-                    fn=export_to_markdown,
-                    inputs=[analysis_output, json_output, md_filename_input, save_location_input],
-                    outputs=[md_file_output]
-            )
-    
-                submit_btn.click(
-                fn=process_assessment,
-                inputs=radio_buttons,
-                outputs=[analysis_output, json_output]
-            )
-            
-            clear_btn.click(
-                fn=lambda: [None] * len(questions) + ["", "", get_default_save_location(), generate_suggested_filename('docx'), generate_suggested_filename('md'), None, None],
-                inputs=None,
-                outputs=radio_buttons + [analysis_output, json_output, save_location_input, word_filename_input, md_filename_input, word_file_output, md_file_output]
-            )
-            
     gr.Markdown("""
-    ---
-    ### 📌 Important Notes:
-    - This assessment is for educational and self-reflection purposes only
-    - Results should not replace professional psychological evaluation
-    - All personality types have strengths and challenges
-    - Most people show mixed patterns across different types
-    
-    ### 💾 Data Management & File Saving:
-    - **Save Location**: Choose where to save files (Documents, Downloads, Desktop, or custom path)
-    - **OS-Specific Defaults**: Automatically detects your operating system and suggests appropriate folders
-    - **Custom Paths**: Edit the save location field to use any writable directory on your system
-    - **Filename Customization**: Edit filename fields before exporting for personalized names
-    - **Default Naming**: Auto-generated names include timestamp for easy organization
-    - **JSON Upload**: Previously saved JSON files can be re-analyzed anytime
-    - **Multiple Formats**: Export to Word (.docx) for professional use or Markdown (.md) for notes
-    - **Browser Download**: Files are also available through your browser's download mechanism
-    
-    ### 📁 Save Location Tips:
-    - **Windows**: Default is `C:\\Users\\YourName\\Documents`
-    - **macOS**: Default is `/Users/YourName/Documents`
-    - **Linux**: Default is `/home/username/Documents`
-    - **Custom**: Edit the path field to save anywhere you have write permissions
-    - **Validation**: System checks if location is writable before saving
-    
-    ### 🔧 API Configuration:
-    To enable full LLM analysis with Claude, set your API key in the environment or modify the code.
-    Without API access, a simplified pattern-matching analysis will be used.
-    """)
+---
+### 📌 Important Notes
+- This assessment is for educational and self-reflection purposes only
+- Results should not replace professional psychological evaluation
+- All personality types have strengths and challenges; most people show mixed patterns
+
+### 🔧 API & Voice Configuration
+- Set `ANTHROPIC_API_KEY` in `.env` for LLM analysis (required)
+- Voice input uses OpenAI Whisper if `OPENAI_API_KEY` is set, otherwise Google STT (free)
+- Voice output requires `gTTS`: `pip install gTTS`
+- STT fallback requires `SpeechRecognition`: `pip install SpeechRecognition`
+""")
+
+    # ── Event handlers ───────────────────────────────────────────────────────
+
+    # Assessment
+    submit_btn.click(
+        fn=process_assessment,
+        inputs=radio_buttons + [extra_info_input, profile_state],
+        outputs=[analysis_output, json_output, profile_state, report_view_toggle]
+    )
+
+    clear_btn.click(
+        fn=lambda: ([None] * len(questions) + ["", "", {}, "Full Report",
+                    get_default_save_location(), generate_suggested_filename('docx'),
+                    generate_suggested_filename('md'), None, None]),
+        inputs=None,
+        outputs=radio_buttons + [analysis_output, json_output, profile_state, report_view_toggle,
+                                  save_location_input, word_filename_input, md_filename_input,
+                                  word_file_output, md_file_output]
+    )
+
+    report_view_toggle.change(
+        fn=switch_report_view,
+        inputs=[report_view_toggle, profile_state],
+        outputs=[analysis_output]
+    )
+
+    # Profile tab
+    save_profile_btn.click(
+        fn=save_profile_as_json,
+        inputs=[profile_state, subject_name_input, profile_filename_input],
+        outputs=[profile_file_output, profile_save_status]
+    )
+
+    profile_file_upload.change(
+        fn=load_profile_file,
+        inputs=[profile_file_upload],
+        outputs=[profile_state, profile_load_status, analysis_output, json_output,
+                 extra_info_input, profile_filename_input, chatbot, *radio_buttons]
+    )
+
+    # Chat tab — welcome on tab open
+    chat_tab.select(
+        fn=initialize_chat,
+        inputs=[chatbot, profile_state],
+        outputs=[chatbot, profile_state]
+    )
+
+    # Text chat — Enter sends
+    chat_input.submit(
+        fn=chat_with_profile,
+        inputs=[chat_input, chatbot, profile_state, chattiness_slider,
+                chatbot_personality, voice_enabled_checkbox],
+        outputs=[chatbot, chat_input, profile_state, memories_display, voice_output]
+    )
+
+    # Voice chat — recording finished triggers transcribe + respond
+    voice_input.change(
+        fn=handle_voice_input,
+        inputs=[voice_input, chatbot, profile_state, chattiness_slider,
+                chatbot_personality, voice_enabled_checkbox],
+        outputs=[chatbot, voice_output, profile_state, memories_display]
+    )
+
+    chat_clear_btn.click(
+        fn=lambda profile: ([], None, profile),
+        inputs=[profile_state],
+        outputs=[chatbot, voice_output, profile_state]
+    )
+
+    chat_reanalyze_btn.click(
+        fn=reanalyze_from_chat,
+        inputs=[chatbot, profile_state],
+        outputs=[chatbot, profile_state]
+    )
+
+    clear_memories_btn.click(
+        fn=clear_memories,
+        inputs=[profile_state],
+        outputs=[profile_state, memories_display]
+    )
+
+    # Save Results tab
+    export_word_btn.click(
+        fn=export_to_word,
+        inputs=[analysis_output, json_output, word_filename_input, save_location_input],
+        outputs=[word_file_output]
+    )
+
+    export_md_btn.click(
+        fn=export_to_markdown,
+        inputs=[analysis_output, json_output, md_filename_input, save_location_input],
+        outputs=[md_file_output]
+    )
+
 
 if __name__ == "__main__":
     load_dotenv()
-    #demo.launch(server_name="127.0.0.1", server_port=7860, share=True, allowed_paths=list(get_default_save_location()))
     demo.launch()
